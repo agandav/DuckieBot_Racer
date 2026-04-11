@@ -11,7 +11,7 @@ import time
 import urllib.error
 import urllib.request
 
-import sst
+import stt
 
 
 # Keep this simple: map speech to one high-level action at a time.
@@ -98,7 +98,7 @@ class VoiceController:
             self._dispatch(action)
 
     def run(self):
-        sst.start(on_recognized=self.on_recognized)
+        stt.start(on_recognized=self.on_recognized)
         print("Voice control started. Say: forward, left, right, or stop.")
         if self.dry_run:
             print("Running in simulation mode (--dry-run).")
@@ -111,7 +111,7 @@ class VoiceController:
         except KeyboardInterrupt:
             pass
         finally:
-            sst.stop()
+            stt.stop()
             print("Voice control stopped.")
 
 
