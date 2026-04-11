@@ -2,6 +2,7 @@ import argparse
 import json
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import subprocess
 
 
 class SimpleMotorDriver:

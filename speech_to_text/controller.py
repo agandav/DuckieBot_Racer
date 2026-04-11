@@ -4,8 +4,23 @@
 " Note: This is a simplified example for demonstration purposes. In a production system, you would want to add error handling, support for more complex commands, and possibly a more robust communication mechanism with the robot. "
 " Make sure to install the required dependencies and set up your ROS environment correctly before running this code. "
 
-import rospy
-from duckietown_msgs.msg import Twist2DStamped
+from importlib import import_module
+
+rospy = None
+Twist2DStamped = None
+
+
+def _load_ros():
+    global rospy, Twist2DStamped
+    if rospy is not None and Twist2DStamped is not None:
+        return
+    try:
+        rospy = import_module("rospy")
+        Twist2DStamped = import_module("duckietown_msgs.msg").Twist2DStamped
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "ROS dependencies are missing. Run this module from a ROS environment with rospy and duckietown_msgs installed."
+        ) from exc
 
 ROBOT_NAME = "YOUR_HOSTNAME"  # e.g. "csc22905"
 
@@ -17,6 +32,7 @@ _pub = None
 
 def init():
     global _pub
+    _load_ros()
     rospy.init_node("voice_controller", anonymous=True)
     topic = f"/{ROBOT_NAME}/car_cmd_switch_node/cmd"
     _pub = rospy.Publisher(topic, Twist2DStamped, queue_size=1)

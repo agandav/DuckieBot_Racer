@@ -11,18 +11,17 @@ import time
 import urllib.error
 import urllib.request
 
-import sst
+import stt
 
 
 # Keep this simple: map speech to one high-level action at a time.
 VOICE_TO_ACTION = {
-    "forward": "forward",
-    "go": "forward",
-    "left": "left",
+    "forward": "forward",  "go": "forward",   "straight": "forward",
+    "ahead": "forward",    "move": "forward",
+    "left": "left",        "left": "left",
     "right": "right",
-    "stop": "stop",
-    "halt": "stop",
-    "brake": "stop",
+    "stop": "stop",        "halt": "stop",     "brake": "stop",
+    "freeze": "stop",      "pause": "stop",
 }
 
 
@@ -98,7 +97,7 @@ class VoiceController:
             self._dispatch(action)
 
     def run(self):
-        sst.start(on_recognized=self.on_recognized)
+        stt.start(on_recognized=self.on_recognized)
         print("Voice control started. Say: forward, left, right, or stop.")
         if self.dry_run:
             print("Running in simulation mode (--dry-run).")
@@ -111,7 +110,7 @@ class VoiceController:
         except KeyboardInterrupt:
             pass
         finally:
-            sst.stop()
+            stt.stop()
             print("Voice control stopped.")
 
 
