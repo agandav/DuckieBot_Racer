@@ -16,13 +16,12 @@ import stt
 
 # Keep this simple: map speech to one high-level action at a time.
 VOICE_TO_ACTION = {
-    "forward": "forward",
-    "go": "forward",
-    "left": "left",
+    "forward": "forward",  "go": "forward",   "straight": "forward",
+    "ahead": "forward",    "move": "forward",
+    "left": "left",        "left": "left",
     "right": "right",
-    "stop": "stop",
-    "halt": "stop",
-    "brake": "stop",
+    "stop": "stop",        "halt": "stop",     "brake": "stop",
+    "freeze": "stop",      "pause": "stop",
 }
 
 
