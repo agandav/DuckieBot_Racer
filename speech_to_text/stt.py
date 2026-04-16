@@ -5,13 +5,14 @@
 # venv/bin/pip install azure-cognitiveservices-speech
 import azure.cognitiveservices.speech as speechsdk
 import time
-import keys
+import keys 
 
 listen = True
 recognized_text = None
 stop_recognition = False
 speech_recognizer = None
 _on_recognized_callback = None
+
 
 
 def set_up(on_recognized=None):
