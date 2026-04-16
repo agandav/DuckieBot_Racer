@@ -15,13 +15,16 @@ Loop logic (every iteration):
        - "race complete"            → exit loop
 
 Run:
-    python main.py --dry-run
-    python main.py --hostname duckiebot-01.local
+    python main.py --dry-run                         # test without robot
+    python main.py --hostname duckiebot18.local      # real robot
 """
 
 import argparse
+import json
 import threading
 import time
+import urllib.error
+import urllib.request
 
 import speech_to_text.stt as stt
 from interpreter import parse
@@ -34,25 +37,44 @@ race_complete  = False      # set True to exit the loop
 command_lock   = threading.Lock()
 
 # ---------------------------------------------------------------------------
-# Sensor stubs — replace with real sensor calls 
+# Args — declared at module level so send_command() can access them
 # ---------------------------------------------------------------------------
-def get_tof_distance() -> float:
-    """Returns distance in cm. Replace with real ToF sensor read."""
-    print("[TOF]  Reading distance...")
-    return 100.0    # stub: always clear
-
-def get_camera_color() -> str:
-    """Returns 'red', 'yellow', 'green', or 'none'. Replace with real camera read."""
-    print("[CAM]  Reading camera...")
-    return "green"  # stub: always green
+args = None
 
 # ---------------------------------------------------------------------------
-# Robot action stubs — replace with real HTTP POST to duckiebot_receiver.py
+# HTTP — sends command to duckiebot_receiver.py running on the robot
 # ---------------------------------------------------------------------------
 def send_command(action: str, direction: str = None, speed: str = "normal"):
-    print(f"[ROBOT] action={action}  direction={direction}  speed={speed}")
-    # TODO: replace with real send_http_command(hostname, {...})
+    # dry-run or no hostname → just print, don't send
+    if args.dry_run or not args.hostname:
+        print(f"[ROBOT] action={action}  direction={direction}  speed={speed}")
+        return
 
+    try:
+        payload = json.dumps({
+            "action":    action,
+            "direction": direction,
+            "speed":     speed
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            url=f"http://{args.hostname}:8080/voice-command",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            body = resp.read().decode("utf-8", errors="ignore")
+            print(f"[HTTP] action={action} status={resp.status} body={body}")
+
+    except urllib.error.URLError as e:
+        print(f"[ERR]  Could not reach robot at {args.hostname}: {e}")
+    except Exception as e:
+        print(f"[ERR]  send_command failed: {e}")
+
+# ---------------------------------------------------------------------------
+# Robot actions — call send_command() which handles dry-run vs real
+# ---------------------------------------------------------------------------
 def robot_stop():
     print("[ROBOT] STOP")
     send_command("stop")
@@ -75,6 +97,17 @@ def robot_lane_follow():
     send_command("lane_follow")
 
 # ---------------------------------------------------------------------------
+# Sensor stubs — replace with real sensor calls from teammates
+# ---------------------------------------------------------------------------
+def get_tof_distance() -> float:
+    """Returns distance in cm. Replace with real ToF sensor read."""
+    return 100.0    # stub: always clear
+
+def get_camera_color() -> str:
+    """Returns 'red', 'yellow', 'green', or 'none'. Replace with real camera read."""
+    return "green"  # stub: always green
+
+# ---------------------------------------------------------------------------
 # STT callback — fires on every recognized phrase (runs in STT thread)
 # ---------------------------------------------------------------------------
 def on_speech(text: str):
@@ -82,13 +115,13 @@ def on_speech(text: str):
 
     print(f"[STT]  '{text}'")
 
-    # check for race complete first
+    # check for race complete first — highest priority
     if any(p in text.lower() for p in ["race complete", "finish", "end race", "done"]):
         print("[STT]  Race complete signal received.")
         race_complete = True
         return
 
-    # parse everything else through LLM
+    # parse everything else through interpreter (GPT + keyword fallback)
     try:
         command = parse(text)
         print(f"[LLM]  {command}")
@@ -101,15 +134,28 @@ def on_speech(text: str):
 # Main loop
 # ---------------------------------------------------------------------------
 def main():
-    global latest_command, race_complete
+    global latest_command, race_complete, args
 
     parser = argparse.ArgumentParser(description="DuckieBot Racer")
-    parser.add_argument("--hostname", default=None, help="Robot hostname or IP")
-    parser.add_argument("--dry-run", action="store_true", help="Print commands, don't send")
+    parser.add_argument(
+        "--hostname",
+        default="duckiebot18.local",
+        help="Robot hostname or IP (default: duckiebot18.local)"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print commands only, don't send to robot"
+    )
     args = parser.parse_args()
 
     # --- Reset: everything reinitializes fresh on each run ---
     print("[INIT] Resetting — speed=0, wheels=forward")
+    if args.dry_run:
+        print("[INIT] DRY RUN mode — no commands will be sent to robot")
+    else:
+        print(f"[INIT] Connecting to robot at {args.hostname}")
+
     current_speed = "normal"
     is_stopped    = False   # True when stopped by sensor or voice
     is_moving     = False   # True once "forward" has been said
