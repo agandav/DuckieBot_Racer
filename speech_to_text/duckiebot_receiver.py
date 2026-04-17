@@ -6,21 +6,23 @@ import subprocess
 
 
 class SimpleMotorDriver:
-    """Tiny motor driver abstraction.
-
-    Replace the body of set_wheels() with your real Duckiebot motor API call.
-    """
-
-    def __init__(self, verbose=True):
+    def __init__(self, robot_name="duckiebot18", verbose=True):
+        self.robot_name = robot_name
         self.verbose = verbose
 
-    def set_wheels(self, left, right):
+    def set_wheels(self, left: float, right: float):
         if self.verbose:
             print(f"[MOTOR] left={left:.2f} right={right:.2f}")
+        import subprocess
+        subprocess.Popen([
+            "rostopic", "pub", "-1",
+            f"/{self.robot_name}/wheels_driver_node/wheels_cmd",
+            "duckietown_msgs/WheelsCmdStamped",
+            f"{{vel_left: {left}, vel_right: {right}}}"
+        ])
 
     def stop(self):
         self.set_wheels(0.0, 0.0)
-
 
 class ActionExecutor:
     def __init__(self, driver, forward_speed=0.35, turn_speed=0.28, turn_bias=0.55, pulse_sec=0.35):

@@ -18,6 +18,7 @@ import stt
 VOICE_TO_ACTION = {
     "forward": "forward",  "go": "forward",   "straight": "forward",
     "ahead": "forward",    "move": "forward",
+    "backward": "backward", "back": "backward", "reverse": "backward",
     "left": "left",        "left": "left",
     "right": "right",
     "stop": "stop",        "halt": "stop",     "brake": "stop",
@@ -34,15 +35,20 @@ def parse_action(text):
     normalized = _normalize_text(text)
     words = normalized.split()
 
+    # multi-word checks FIRST — before single word loop
+    if "turn left"  in normalized: return "left"
+    if "turn right" in normalized: return "right"
+    if "go back"    in normalized: return "backward"
+    if "back up"    in normalized: return "backward"
+    if "go forward" in normalized: return "forward"
+    if "go straight" in normalized: return "forward"
+    if "speed up"   in normalized: return "faster"
+    if "slow down"  in normalized: return "slower"
+
+
     for word in words:
         if word in VOICE_TO_ACTION:
             return VOICE_TO_ACTION[word]
-
-    # Helpful multi-word fallbacks
-    if "turn left" in normalized:
-        return "left"
-    if "turn right" in normalized:
-        return "right"
 
     return None
 

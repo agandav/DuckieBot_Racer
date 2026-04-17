@@ -20,8 +20,11 @@ Run:
 """
 
 import argparse
+import json
 import threading
 import time
+import urllib.request
+import urllib.error
 
 import speech_to_text.stt as stt
 from interpreter import parse
@@ -38,20 +41,31 @@ command_lock   = threading.Lock()
 # ---------------------------------------------------------------------------
 def get_tof_distance() -> float:
     """Returns distance in cm. Replace with real ToF sensor read."""
-    print("[TOF]  Reading distance...")
     return 100.0    # stub: always clear
 
 def get_camera_color() -> str:
     """Returns 'red', 'yellow', 'green', or 'none'. Replace with real camera read."""
-    print("[CAM]  Reading camera...")
     return "green"  # stub: always green
 
 # ---------------------------------------------------------------------------
 # Robot action stubs — replace with real HTTP POST to duckiebot_receiver.py
 # ---------------------------------------------------------------------------
 def send_command(action: str, direction: str = None, speed: str = "normal"):
-    print(f"[ROBOT] action={action}  direction={direction}  speed={speed}")
-    # TODO: replace with real send_http_command(hostname, {...})
+    if args.dry_run:
+        print(f"[ROBOT] action={action} direction={direction} speed={speed}")
+        return
+    payload = json.dumps({"action": action}).encode("utf-8")
+    req = urllib.request.Request(
+        url=f"http://{args.hostname}:8080/voice-command",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=2.0) as r:
+            print(f"[HTTP] {r.status}")
+    except Exception as e:
+        print(f"[ERR] {e}")
 
 def robot_stop():
     print("[ROBOT] STOP")
@@ -82,30 +96,41 @@ def on_speech(text: str):
 
     print(f"[STT]  '{text}'")
 
-    # check for race complete first
     if any(p in text.lower() for p in ["race complete", "finish", "end race", "done"]):
-        print("[STT]  Race complete signal received.")
         race_complete = True
         return
 
-    # parse everything else through LLM
+    # try GPT first
+    command = None
     try:
         command = parse(text)
         print(f"[LLM]  {command}")
+    except Exception as e:
+        print(f"[LLM]  Failed: {e} — falling back to keywords")
+
+    # keyword fallback
+    if command is None:
+        from speech_to_text.duckiebot_voice_control import parse_action
+        action = parse_action(text)
+        if action:
+            command = {"action": action, "direction": None, "speed": "normal"}
+            print(f"[KW]   {command}")
+
+    if command:
         with command_lock:
             latest_command = command
-    except Exception as e:
-        print(f"[LLM]  Parse error: {e}")
+    else:
+        print(f"[CMD]  No match for: '{text}'")
 
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 def main():
-    global latest_command, race_complete
+    global latest_command, race_complete, args  # add args here
 
     parser = argparse.ArgumentParser(description="DuckieBot Racer")
-    parser.add_argument("--hostname", default=None, help="Robot hostname or IP")
-    parser.add_argument("--dry-run", action="store_true", help="Print commands, don't send")
+    parser.add_argument("--hostname", default=None)
+    parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     # --- Reset: everything reinitializes fresh on each run ---
