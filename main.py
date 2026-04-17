@@ -2,21 +2,17 @@
 main.py — DuckieBot Racer
 
 Loop logic (every iteration):
-    1. Sensor check first (ToF + camera) — highest priority
+    1. GET /camera-color from robot — gets color + yellow position in one call
+    2. Sensor check (ToF + camera) — highest priority
        - ToF < threshold OR cam = red  → stop
-       - ToF > threshold AND cam != red AND was stopped → auto resume
-       - cam = yellow → lane follow
-    2. Voice command check
-       - "stop" / "pause"           → stop
-       - "forward"                  → move forward (default mode)
-       - "turn left" / "turn right" → steer (works even when stopped)
-       - "backwards"                → reverse
-       - "faster" / "slower"        → adjust speed
-       - "race complete"            → exit loop
+       - cam = yellow → lane follow using yellow position
+       - auto resume when path clears (only if sensor caused stop)
+    3. Continuous motion — re-send forward/backward every 0.5s
+    4. Voice command check
 
 Run:
-    python main.py --dry-run                         # test without robot
-    python main.py --hostname duckiebot18.local      # real robot
+    python main.py --dry-run
+    python main.py --hostname duckiebot18.local
 """
 
 import argparse
@@ -30,50 +26,44 @@ import speech_to_text.stt as stt
 from interpreter import parse
 
 # ---------------------------------------------------------------------------
-# Shared state — written by STT thread, read by main loop
+# Shared state
 # ---------------------------------------------------------------------------
 latest_command = None
 race_complete  = False
 command_lock   = threading.Lock()
-
-# ---------------------------------------------------------------------------
-# Args — declared at module level so send_command() can access them
-# ---------------------------------------------------------------------------
-args = None
+args           = None
 
 # ---------------------------------------------------------------------------
 # Fast keyword matching — no GPT needed for simple commands
-# Order matters — check longer phrases first (e.g. "turn left" before "left")
 # ---------------------------------------------------------------------------
 QUICK_COMMANDS = [
-    ("turn left",   {"action": "turn", "direction": "left",     "speed": None}),
-    ("turn right",  {"action": "turn", "direction": "right",    "speed": None}),
-    ("go left",     {"action": "turn", "direction": "left",     "speed": None}),
-    ("go right",    {"action": "turn", "direction": "right",    "speed": None}),
-    ("speed up",    {"action": "adjust", "direction": None,     "speed": "fast"}),
-    ("slow down",   {"action": "adjust", "direction": None,     "speed": "slow"}),
-    ("go forward",  {"action": "move", "direction": "forward",  "speed": "normal"}),
-    ("go back",     {"action": "move", "direction": "backward", "speed": "normal"}),
-    ("forward",     {"action": "move", "direction": "forward",  "speed": "normal"}),
-    ("go",          {"action": "move", "direction": "forward",  "speed": "normal"}),
-    ("ahead",       {"action": "move", "direction": "forward",  "speed": "normal"}),
-    ("straight",    {"action": "move", "direction": "forward",  "speed": "normal"}),
-    ("move",        {"action": "move", "direction": "forward",  "speed": "normal"}),
-    ("backward",    {"action": "move", "direction": "backward", "speed": "normal"}),
-    ("reverse",     {"action": "move", "direction": "backward", "speed": "normal"}),
-    ("back",        {"action": "move", "direction": "backward", "speed": "normal"}),
-    ("left",        {"action": "turn", "direction": "left",     "speed": None}),
-    ("right",       {"action": "turn", "direction": "right",    "speed": None}),
-    ("stop",        {"action": "stop", "direction": None,       "speed": None}),
-    ("halt",        {"action": "stop", "direction": None,       "speed": None}),
-    ("brake",       {"action": "stop", "direction": None,       "speed": None}),
-    ("pause",       {"action": "stop", "direction": None,       "speed": None}),
-    ("freeze",      {"action": "stop", "direction": None,       "speed": None}),
-    ("faster",      {"action": "adjust", "direction": None,     "speed": "fast"}),
-    ("slower",      {"action": "adjust", "direction": None,     "speed": "slow"}),
+    ("turn left",   {"action": "turn",   "direction": "left",     "speed": None}),
+    ("turn right",  {"action": "turn",   "direction": "right",    "speed": None}),
+    ("go left",     {"action": "turn",   "direction": "left",     "speed": None}),
+    ("go right",    {"action": "turn",   "direction": "right",    "speed": None}),
+    ("speed up",    {"action": "adjust", "direction": None,       "speed": "fast"}),
+    ("slow down",   {"action": "adjust", "direction": None,       "speed": "slow"}),
+    ("go forward",  {"action": "move",   "direction": "forward",  "speed": "normal"}),
+    ("go back",     {"action": "move",   "direction": "backward", "speed": "normal"}),
+    ("forward",     {"action": "move",   "direction": "forward",  "speed": "normal"}),
+    ("go",          {"action": "move",   "direction": "forward",  "speed": "normal"}),
+    ("ahead",       {"action": "move",   "direction": "forward",  "speed": "normal"}),
+    ("straight",    {"action": "move",   "direction": "forward",  "speed": "normal"}),
+    ("move",        {"action": "move",   "direction": "forward",  "speed": "normal"}),
+    ("backward",    {"action": "move",   "direction": "backward", "speed": "normal"}),
+    ("reverse",     {"action": "move",   "direction": "backward", "speed": "normal"}),
+    ("back",        {"action": "move",   "direction": "backward", "speed": "normal"}),
+    ("left",        {"action": "turn",   "direction": "left",     "speed": None}),
+    ("right",       {"action": "turn",   "direction": "right",    "speed": None}),
+    ("stop",        {"action": "stop",   "direction": None,       "speed": None}),
+    ("halt",        {"action": "stop",   "direction": None,       "speed": None}),
+    ("brake",       {"action": "stop",   "direction": None,       "speed": None}),
+    ("pause",       {"action": "stop",   "direction": None,       "speed": None}),
+    ("freeze",      {"action": "stop",   "direction": None,       "speed": None}),
+    ("faster",      {"action": "adjust", "direction": None,       "speed": "fast"}),
+    ("slower",      {"action": "adjust", "direction": None,       "speed": "slow"}),
 ]
 
-# Words that must appear in speech to even consider processing it
 COMMAND_WORDS = [w for w, _ in QUICK_COMMANDS] + ["race complete", "finish", "end race", "done"]
 
 def contains_command(text: str) -> bool:
@@ -81,46 +71,68 @@ def contains_command(text: str) -> bool:
     return any(w in text_lower for w in COMMAND_WORDS)
 
 def parse_fast(text: str) -> dict | None:
-    """
-    Try to match text to a known command without calling GPT.
-    Returns the command dict if matched, None if no match.
-    """
     text_lower = text.lower().strip().rstrip(".")
     for keyword, command in QUICK_COMMANDS:
         if keyword in text_lower:
             print(f"[FAST] Matched '{keyword}' — skipping GPT")
             return command
-    return None  # no match → fall through to GPT
+    return None
 
 # ---------------------------------------------------------------------------
-# HTTP — sends command to duckiebot_receiver.py running on the robot
+# HTTP helpers
 # ---------------------------------------------------------------------------
+def _http_post(path: str, payload: dict):
+    """POST JSON to robot."""
+    data = json.dumps(payload).encode("utf-8")
+    req  = urllib.request.Request(
+        url=f"http://{args.hostname}:8888{path}",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=2.0) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+def _http_get(path: str) -> dict:
+    """GET from robot, returns parsed JSON."""
+    req = urllib.request.Request(
+        url=f"http://{args.hostname}:8888{path}",
+        method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=2.0) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
 def send_command(action: str, direction: str = None, speed: str = "normal"):
     if args.dry_run or not args.hostname:
         print(f"[ROBOT] action={action}  direction={direction}  speed={speed}")
         return
-
     try:
-        payload = json.dumps({
+        result = _http_post("/voice-command", {
             "action":    action,
             "direction": direction,
-            "speed":     speed
-        }).encode("utf-8")
-
-        req = urllib.request.Request(
-            url=f"http://{args.hostname}:8888/voice-command",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=2.0) as resp:
-            body = resp.read().decode("utf-8", errors="ignore")
-            print(f"[HTTP] action={action} status={resp.status} body={body}")
-
+            "speed":     speed,
+        })
+        print(f"[HTTP] action={action} ok={result.get('ok')}")
     except urllib.error.URLError as e:
-        print(f"[ERR]  Could not reach robot at {args.hostname}: {e}")
+        print(f"[ERR]  Could not reach robot: {e}")
     except Exception as e:
         print(f"[ERR]  send_command failed: {e}")
+
+def get_camera_reading() -> tuple[str, str]:
+    """
+    GET /camera-color from robot.
+    Returns (color, yellow_position).
+    color:    "red" | "yellow" | "green" | "none"
+    position: "left" | "right" | "center"
+    """
+    if args.dry_run or not args.hostname:
+        return "none", "center"
+    try:
+        result = _http_get("/camera-color")
+        return result.get("color", "none"), result.get("position", "center")
+    except Exception as e:
+        print(f"[ERR]  Camera read failed: {e}")
+        return "none", "center"
 
 # ---------------------------------------------------------------------------
 # Robot actions
@@ -142,7 +154,7 @@ def robot_backward(speed="normal"):
     print(f"[ROBOT] BACKWARD  speed={speed}")
     send_command("move", "backward", speed)
 
-def robot_lane_follow(yellow_pos: str = "center"):
+def robot_lane_follow(yellow_pos: str):
     print(f"[ROBOT] LANE FOLLOW  yellow={yellow_pos}")
     if yellow_pos == "left":
         send_command("adjust", "left")
@@ -152,16 +164,10 @@ def robot_lane_follow(yellow_pos: str = "center"):
         send_command("move", "forward")
 
 # ---------------------------------------------------------------------------
-# Sensor stubs — replace with real sensor calls
+# ToF stub — replace with real sensor
 # ---------------------------------------------------------------------------
 def get_tof_distance() -> float:
-    return 100.0    # stub: always clear
-
-def get_camera_color() -> str:
-    return "green"  # stub: always green
-
-def get_yellow_position() -> str:
-    return "center"  # stub: always centered
+    return 100.0
 
 # ---------------------------------------------------------------------------
 # STT callback
@@ -169,27 +175,21 @@ def get_yellow_position() -> str:
 def on_speech(text: str):
     global latest_command, race_complete
 
-    # ignore empty or whitespace-only recognition
     if not text or not text.strip():
         return
 
     print(f"[STT]  '{text}'")
 
-    # ignore if no known command word detected — filters background noise
     if not contains_command(text):
         print(f"[STT]  Ignored (no command word found)")
         return
 
-    # check for race complete first
     if any(p in text.lower() for p in ["race complete", "finish", "end race", "done"]):
         print("[STT]  Race complete signal received.")
         race_complete = True
         return
 
-    # try fast keyword match first — no GPT needed
     command = parse_fast(text)
-
-    # fall back to GPT only if no keyword matched
     if command is None:
         print("[LLM]  No keyword match — calling GPT...")
         try:
@@ -210,12 +210,12 @@ def main():
 
     parser = argparse.ArgumentParser(description="DuckieBot Racer")
     parser.add_argument("--hostname", default="duckiebot18.local")
-    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--dry-run",  action="store_true")
     args = parser.parse_args()
 
     print("[INIT] Resetting — speed=0, wheels=forward")
     if args.dry_run:
-        print("[INIT] DRY RUN mode — no commands will be sent to robot")
+        print("[INIT] DRY RUN mode")
     else:
         print(f"[INIT] Connecting to robot at {args.hostname}")
 
@@ -226,8 +226,7 @@ def main():
     last_forward_time  = 0.0
     last_backward_time = 0.0
     RESEND_INTERVAL    = 0.5
-
-    TOF_THRESHOLD = 30.0
+    TOF_THRESHOLD      = 30.0
 
     stt.start(on_recognized=on_speech)
     print("[INIT] Listening for commands. Say 'forward' to begin.")
@@ -236,14 +235,14 @@ def main():
 
     while not race_complete:
         time.sleep(0.1)
-
         now = time.time()
 
         # ----------------------------------------------------------------
         # 1. SENSOR CHECKS
+        #    One HTTP call gets both color AND yellow position from robot
         # ----------------------------------------------------------------
-        tof_dist  = get_tof_distance()
-        cam_color = get_camera_color()
+        tof_dist             = get_tof_distance()
+        cam_color, yellow_pos = get_camera_reading()
 
         sensor_blocked = (tof_dist < TOF_THRESHOLD) or (cam_color == "red")
 
@@ -255,7 +254,6 @@ def main():
 
         elif is_stopped:
             if is_moving or is_reversing:
-                # only auto resume if sensor caused the stop
                 print("[SENSOR] Path clear — auto resuming.")
                 is_stopped = False
                 if is_moving:
@@ -265,15 +263,13 @@ def main():
                     robot_backward(current_speed)
                     last_backward_time = now
             else:
-                # voice stop — don't auto resume
-                is_stopped = False
+                is_stopped = False  # voice stop — don't auto resume
 
         # ----------------------------------------------------------------
         # 2. CONTINUOUS MOTION
         # ----------------------------------------------------------------
         if not sensor_blocked and not is_stopped:
             if cam_color == "yellow":
-                yellow_pos = get_yellow_position()
                 print(f"[CAM]  Yellow — lane following ({yellow_pos}).")
                 robot_lane_follow(yellow_pos)
                 last_forward_time = now
@@ -348,9 +344,6 @@ def main():
         else:
             print(f"[CMD]  Unhandled command: {cmd}")
 
-    # ----------------------------------------------------------------
-    # Race complete
-    # ----------------------------------------------------------------
     print("=" * 50)
     print("[DONE] Race complete. Stopping robot.")
     robot_stop()
