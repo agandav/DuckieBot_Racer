@@ -58,7 +58,7 @@ def send_command(action: str, direction: str = None, speed: str = "normal"):
         }).encode("utf-8")
 
         req = urllib.request.Request(
-            url=f"http://{args.hostname}:8080/voice-command",
+            url=f"http://{args.hostname}:9090/voice-command",
             data=payload,
             headers={"Content-Type": "application/json"},
             method="POST",

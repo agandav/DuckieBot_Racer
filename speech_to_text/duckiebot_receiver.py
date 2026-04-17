@@ -2,24 +2,36 @@ import argparse
 import json
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
-import subprocess
+
+# ---------------------------------------------------------------------------
+# Import controller — this works because we're running inside the Docker
+# container where ROS and duckietown_msgs are available
+# ---------------------------------------------------------------------------
+import controller
 
 
 class SimpleMotorDriver:
-    """Tiny motor driver abstraction.
-
-    Replace the body of set_wheels() with your real Duckiebot motor API call.
-    """
-
     def __init__(self, verbose=True):
         self.verbose = verbose
 
     def set_wheels(self, left, right):
         if self.verbose:
             print(f"[MOTOR] left={left:.2f} right={right:.2f}")
+        # now calls controller.execute() instead of just printing
+        if left > 0 and right > 0:
+            controller.execute({"action": "move", "direction": "forward", "speed": "normal"})
+        elif left < 0 and right < 0:
+            controller.execute({"action": "move", "direction": "backward", "speed": "normal"})
+        elif left <= 0 and right > 0:
+            controller.execute({"action": "turn", "direction": "left", "speed": None})
+        elif left > 0 and right <= 0:
+            controller.execute({"action": "turn", "direction": "right", "speed": None})
+        else:
+            controller.execute({"action": "stop", "direction": None, "speed": None})
 
     def stop(self):
-        self.set_wheels(0.0, 0.0)
+        print("[MOTOR] STOP")
+        controller.execute({"action": "stop", "direction": None, "speed": None})
 
 
 class ActionExecutor:
@@ -31,23 +43,33 @@ class ActionExecutor:
         self.pulse_sec = pulse_sec
 
     def execute(self, action):
-        if action == "forward":
+        if action in ("forward", "move"):
             self.driver.set_wheels(self.forward_speed, self.forward_speed)
             return
 
         if action == "left":
-            self.driver.set_wheels(-self.turn_speed * self.turn_bias, self.turn_speed)
+            self.driver.set_wheels(
+                -self.turn_speed * self.turn_bias,
+                self.turn_speed
+            )
             time.sleep(self.pulse_sec)
             self.driver.stop()
             return
 
         if action == "right":
-            self.driver.set_wheels(self.turn_speed, -self.turn_speed * self.turn_bias)
+            self.driver.set_wheels(
+                self.turn_speed,
+                -self.turn_speed * self.turn_bias
+            )
             time.sleep(self.pulse_sec)
             self.driver.stop()
             return
 
-        if action == "stop":
+        if action == "backward":
+            self.driver.set_wheels(-self.forward_speed, -self.forward_speed)
+            return
+
+        if action in ("stop", "lane_follow"):
             self.driver.stop()
             return
 
@@ -84,17 +106,28 @@ def build_handler(executor):
                 return
 
             action = data.get("action")
+            direction = data.get("direction")
+
             if not isinstance(action, str):
                 self._send_json(400, {"ok": False, "error": "missing action"})
                 return
 
             action = action.strip().lower()
+
+            # map action+direction combos to simple actions
+            if action == "move" and direction == "backward":
+                action = "backward"
+            elif action == "turn" and direction == "right":
+                action = "right"
+            elif action == "turn" and direction == "left":
+                action = "left"
+
             try:
                 executor.execute(action)
             except ValueError as exc:
                 self._send_json(400, {"ok": False, "error": str(exc)})
                 return
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 self._send_json(500, {"ok": False, "error": f"execution failure: {exc}"})
                 return
 
@@ -114,12 +147,12 @@ def build_handler(executor):
 
 def main():
     parser = argparse.ArgumentParser(description="Tiny Duckiebot receiver for /voice-command")
-    parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=8080, help="Bind port (default: 8080)")
-    parser.add_argument("--forward-speed", type=float, default=0.35, help="Forward wheel speed")
-    parser.add_argument("--turn-speed", type=float, default=0.28, help="Turn wheel speed")
-    parser.add_argument("--turn-bias", type=float, default=0.55, help="Inner wheel bias while turning")
-    parser.add_argument("--turn-pulse", type=float, default=0.35, help="Seconds for each turn pulse")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=9090)
+    parser.add_argument("--forward-speed", type=float, default=0.35)
+    parser.add_argument("--turn-speed", type=float, default=0.28)
+    parser.add_argument("--turn-bias", type=float, default=0.55)
+    parser.add_argument("--turn-pulse", type=float, default=0.35)
 
     args = parser.parse_args()
 
