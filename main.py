@@ -1,14 +1,11 @@
 """
 main.py — DuckieBot Racer
 
-Loop logic (every iteration):
-    1. GET /camera-color from robot every 0.5s (cached between polls)
-    2. Sensor check (ToF + camera) — highest priority
-       - ToF < threshold OR cam = red  → stop
-       - cam = yellow → lane follow using yellow position
-       - auto resume when path clears (only if sensor caused stop)
-    3. Continuous motion — re-send forward/backward every 0.5s
-    4. Voice command check
+Logic:
+    - Each voice command executes ONCE — no resending, no defaults
+    - Robot stops after every command and waits for next instruction
+    - Sensors can override and stop the robot (ToF + red light)
+    - Sensor clear → auto resume only if robot was moving
 
 Run:
     python main.py --dry-run
@@ -28,13 +25,15 @@ from interpreter import parse
 # ---------------------------------------------------------------------------
 # Shared state
 # ---------------------------------------------------------------------------
-latest_command = None
-race_complete  = False
-command_lock   = threading.Lock()
-args           = None
+latest_command    = None
+race_complete     = False
+command_lock      = threading.Lock()
+args              = None
+_last_speech_time = 0.0    # STT cooldown tracker
 
 # ---------------------------------------------------------------------------
 # Fast keyword matching — no GPT needed for simple commands
+# Order matters — longer phrases must come before shorter ones
 # ---------------------------------------------------------------------------
 QUICK_COMMANDS = [
     ("turn left",   {"action": "turn",   "direction": "left",     "speed": None}),
@@ -66,9 +65,10 @@ QUICK_COMMANDS = [
 
 COMMAND_WORDS = [w for w, _ in QUICK_COMMANDS] + ["race complete", "finish", "end race", "done"]
 
+STT_COOLDOWN = 0.8  # seconds between commands
+
 def contains_command(text):
-    text_lower = text.lower()
-    return any(w in text_lower for w in COMMAND_WORDS)
+    return any(w in text.lower() for w in COMMAND_WORDS)
 
 def parse_fast(text):
     text_lower = text.lower().strip().rstrip(".")
@@ -117,22 +117,16 @@ def send_command(action, direction=None, speed="normal"):
         print("[ERR]  send_command failed: {}".format(e))
 
 def get_camera_reading():
-    """
-    GET /camera-color from robot.
-    Returns (color, yellow_position).
-    Only called every CAMERA_INTERVAL seconds.
-    """
     if args.dry_run or not args.hostname:
         return "none", "center"
     try:
         result = _http_get("/camera-color")
         return result.get("color", "none"), result.get("position", "center")
-    except Exception as e:
-        print("[ERR]  Camera read failed: {}".format(e))
-        return "none", "center"
+    except Exception:
+        return "none", "center"  # fail silently
 
 # ---------------------------------------------------------------------------
-# Robot actions
+# Robot actions — each executes once then stops (duration handled by controller)
 # ---------------------------------------------------------------------------
 def robot_stop():
     print("[ROBOT] STOP")
@@ -146,6 +140,11 @@ def robot_turn(direction):
     print("[ROBOT] TURN {}".format(direction.upper()))
     send_command("turn", direction)
     time.sleep(1.0)
+    # flush any commands that queued during the turn
+    with command_lock:
+        global latest_command
+        latest_command = None
+    print("[TURN] Done")
 
 def robot_backward(speed="normal"):
     print("[ROBOT] BACKWARD  speed={}".format(speed))
@@ -161,32 +160,48 @@ def robot_lane_follow(yellow_pos):
         send_command("move", "forward")
 
 # ---------------------------------------------------------------------------
-# ToF stub — replace with real sensor
+# ToF stub — replace with real sensor read
 # ---------------------------------------------------------------------------
 def get_tof_distance():
-    return 100.0
+    return 100.0    # stub: always clear
 
 # ---------------------------------------------------------------------------
-# STT callback
+# STT callback — runs in STT thread
 # ---------------------------------------------------------------------------
 def on_speech(text):
-    global latest_command, race_complete
+    global latest_command, race_complete, _last_speech_time
+
+    now = time.time()
 
     if not text or not text.strip():
         return
 
     print("[STT]  '{}'".format(text))
 
+    # filter background noise
     if not contains_command(text):
         print("[STT]  Ignored (no command word found)")
         return
 
+    # cooldown
+    if now - _last_speech_time < STT_COOLDOWN:
+        print("[STT]  Ignored (cooldown {:.2f}s remaining)".format(
+            STT_COOLDOWN - (now - _last_speech_time)
+        ))
+        return
+
+    _last_speech_time = now
+
+    # race complete — highest priority
     if any(p in text.lower() for p in ["race complete", "finish", "end race", "done"]):
         print("[STT]  Race complete signal received.")
         race_complete = True
         return
 
+    # fast keyword match first
     command = parse_fast(text)
+
+    # fall back to GPT only if no keyword matched
     if command is None:
         print("[LLM]  No keyword match — calling GPT...")
         try:
@@ -200,26 +215,23 @@ def on_speech(text):
         latest_command = command
 
 # ---------------------------------------------------------------------------
-# Shared state for threading
+# Camera thread
 # ---------------------------------------------------------------------------
 camera_data = {"color": "none", "position": "center"}
 camera_lock = threading.Lock()
 
-# Thread function for continuous camera reading
-def camera_thread():
-    global camera_data
+def camera_thread_fn():
     while not race_complete:
         try:
             color, position = get_camera_reading()
             with camera_lock:
-                camera_data["color"] = color
+                camera_data["color"]    = color
                 camera_data["position"] = position
-        except Exception as e:
-            print(f"[ERR] Camera thread error: {e}")
-        time.sleep(0.1)  # Adjust frequency as needed
+        except Exception:
+            pass
+        time.sleep(0.1)
 
-# Thread function for speech-to-text listener
-def stt_thread():
+def stt_thread_fn():
     stt.start(on_recognized=on_speech)
     print("[STT] Speech-to-text thread started.")
 
@@ -240,79 +252,61 @@ def main():
     else:
         print("[INIT] Connecting to robot at {}".format(args.hostname))
 
-    current_speed      = "normal"
-    is_stopped         = False
-    is_moving          = False
-    is_reversing       = False
-    last_forward_time  = 0.0
-    last_backward_time = 0.0
-    last_camera_time   = 0.0
+    current_speed = "normal"
+    is_stopped    = False   # True when stopped by sensor
+    is_moving     = False   # True when last command was forward
+    is_reversing  = False   # True when last command was backward
 
-    RESEND_INTERVAL  = 0.5   # re-send forward/backward every 0.5s
-    CAMERA_INTERVAL  = 0.5   # poll camera every 0.5s
-    TOF_THRESHOLD    = 30.0
+    TOF_THRESHOLD = 30.0    # cm
 
-    # Start threads
-    camera_thread_instance = threading.Thread(target=camera_thread, daemon=True)
-    stt_thread_instance = threading.Thread(target=stt_thread, daemon=True)
-    camera_thread_instance.start()
-    stt_thread_instance.start()
+    # start background threads
+    threading.Thread(target=camera_thread_fn, daemon=True).start()
+    threading.Thread(target=stt_thread_fn,    daemon=True).start()
+
+    print("[INIT] Listening for commands. Say 'forward' to begin.")
+    print("[INIT] Say 'race complete' to finish.")
+    print("=" * 50)
 
     while not race_complete:
         time.sleep(0.1)
-        now = time.time()
 
         # ----------------------------------------------------------------
         # 1. SENSOR CHECKS
-        #    Use shared camera data updated by the camera thread
         # ----------------------------------------------------------------
         tof_dist = get_tof_distance()
         with camera_lock:
-            cam_color = camera_data["color"]
+            cam_color  = camera_data["color"]
             yellow_pos = camera_data["position"]
 
         sensor_blocked = (tof_dist < TOF_THRESHOLD) or (cam_color == "red")
 
         if sensor_blocked:
             if not is_stopped:
-                print(f"[SENSOR] Blocked! tof={tof_dist:.1f}cm  cam={cam_color} — stopping.")
+                print("[SENSOR] Blocked! tof={:.1f}cm  cam={} — stopping.".format(
+                    tof_dist, cam_color))
                 robot_stop()
                 is_stopped = True
 
         elif is_stopped:
+            # auto resume only if sensor caused the stop
             if is_moving or is_reversing:
                 print("[SENSOR] Path clear — auto resuming.")
                 is_stopped = False
                 if is_moving:
                     robot_forward(current_speed)
-                    last_forward_time = now
                 elif is_reversing:
                     robot_backward(current_speed)
-                    last_backward_time = now
             else:
                 is_stopped = False  # voice stop — don't auto resume
 
-        # ----------------------------------------------------------------
-        # 2. CONTINUOUS MOTION
-        # ----------------------------------------------------------------
+        # lane follow when yellow detected and not blocked
         if not sensor_blocked and not is_stopped:
             if cam_color == "yellow":
-                print(f"[CAM]  Yellow — lane following ({yellow_pos}).")
+                print("[CAM]  Yellow — lane following ({}).".format(yellow_pos))
                 robot_lane_follow(yellow_pos)
-                last_forward_time = now
-
-            elif is_moving:
-                if now - last_forward_time >= RESEND_INTERVAL:
-                    robot_forward(current_speed)
-                    last_forward_time = now
-
-            elif is_reversing:
-                if now - last_backward_time >= RESEND_INTERVAL:
-                    robot_backward(current_speed)
-                    last_backward_time = now
 
         # ----------------------------------------------------------------
-        # 3. VOICE COMMAND CHECK
+        # 2. VOICE COMMAND CHECK — execute once, no resend
         # ----------------------------------------------------------------
         with command_lock:
             cmd = latest_command
@@ -339,38 +333,30 @@ def main():
             is_reversing  = False
             is_stopped    = False
             robot_forward(current_speed)
-            last_forward_time = now
 
         elif action == "turn":
             print("[CMD]  Voice turn {}.".format(direction))
             robot_turn(direction)
-            if is_moving:
-                is_stopped = False
-                robot_forward(current_speed)
-                last_forward_time = now
+            # no auto-resume — robot stops after turn, waits for next command
 
         elif action == "move" and direction == "backward":
             print("[CMD]  Voice backward.")
-            current_speed  = speed
-            is_reversing   = True
-            is_moving      = False
-            is_stopped     = False
+            current_speed = speed
+            is_reversing  = True
+            is_moving     = False
+            is_stopped    = False
             robot_backward(current_speed)
-            last_backward_time = now
 
-        elif action == "adjust" or speed != current_speed:
+        elif action == "adjust":
             current_speed = speed
             print("[CMD]  Speed adjusted to {}.".format(current_speed))
-            if is_moving and not is_stopped:
-                robot_forward(current_speed)
-                last_forward_time = now
-            elif is_reversing and not is_stopped:
-                robot_backward(current_speed)
-                last_backward_time = now
 
         else:
             print("[CMD]  Unhandled command: {}".format(cmd))
 
+    # ----------------------------------------------------------------
+    # Race complete
+    # ----------------------------------------------------------------
     print("=" * 50)
     print("[DONE] Race complete. Stopping robot.")
     robot_stop()
