@@ -45,13 +45,9 @@ QUICK_COMMANDS = [
     ("go forward",  {"action": "move",   "direction": "forward",  "speed": "normal"}),
     ("go back",     {"action": "move",   "direction": "backward", "speed": "normal"}),
     ("forward",     {"action": "move",   "direction": "forward",  "speed": "normal"}),
-    ("go",          {"action": "move",   "direction": "forward",  "speed": "normal"}),
-    ("ahead",       {"action": "move",   "direction": "forward",  "speed": "normal"}),
     ("straight",    {"action": "move",   "direction": "forward",  "speed": "normal"}),
-    ("move",        {"action": "move",   "direction": "forward",  "speed": "normal"}),
     ("backward",    {"action": "move",   "direction": "backward", "speed": "normal"}),
     ("reverse",     {"action": "move",   "direction": "backward", "speed": "normal"}),
-    ("back",        {"action": "move",   "direction": "backward", "speed": "normal"}),
     ("left",        {"action": "turn",   "direction": "left",     "speed": None}),
     ("right",       {"action": "turn",   "direction": "right",    "speed": None}),
     ("stop",        {"action": "stop",   "direction": None,       "speed": None}),
@@ -97,7 +93,7 @@ def _http_get(path):
         url="http://{}:8888{}".format(args.hostname, path),
         method="GET",
     )
-    with urllib.request.urlopen(req, timeout=2.0) as resp:
+    with urllib.request.urlopen(req, timeout=0.3) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 def send_command(action, direction=None, speed="normal"):
@@ -129,14 +125,13 @@ def get_tof_distance():
     if args.dry_run or not args.hostname:
         return 100.0
     try:
-        result = _http_get("/tof-distance")  # Updated path to match robot's API
+        result = _http_get("/tof-distance")
         return float(result.get("distance_cm", 100.0))
-    except Exception as e:
-        print("[ERR]  ToF read failed: {}".format(e))
+    except Exception:
         return 100.0  # fail-safe: assume clear
 
 # ---------------------------------------------------------------------------
-# Robot actions — each executes once then stops (duration handled by controller)
+# Robot actions
 # ---------------------------------------------------------------------------
 def robot_stop():
     print("[ROBOT] STOP")
@@ -150,7 +145,6 @@ def robot_turn(direction):
     print("[ROBOT] TURN {}".format(direction.upper()))
     send_command("turn", direction)
     time.sleep(1.0)
-    # flush any commands that queued during the turn
     with command_lock:
         global latest_command
         latest_command = None
@@ -170,19 +164,6 @@ def robot_lane_follow(yellow_pos):
         send_command("move", "forward")
 
 # ---------------------------------------------------------------------------
-# ToF thread
-# ---------------------------------------------------------------------------
-tof_data = {"distance": 100.0}
-tof_lock  = threading.Lock()
-
-def tof_thread():
-    while not race_complete:
-        dist = get_tof_distance()
-        with tof_lock:
-            tof_data["distance"] = dist
-        time.sleep(0.05)  # 20 Hz is plenty for a slow bot
-
-# ---------------------------------------------------------------------------
 # STT callback — runs in STT thread
 # ---------------------------------------------------------------------------
 def on_speech(text):
@@ -195,12 +176,10 @@ def on_speech(text):
 
     print("[STT]  '{}'".format(text))
 
-    # filter background noise
     if not contains_command(text):
         print("[STT]  Ignored (no command word found)")
         return
 
-    # cooldown
     if now - _last_speech_time < STT_COOLDOWN:
         print("[STT]  Ignored (cooldown {:.2f}s remaining)".format(
             STT_COOLDOWN - (now - _last_speech_time)
@@ -209,16 +188,13 @@ def on_speech(text):
 
     _last_speech_time = now
 
-    # race complete — highest priority
     if any(p in text.lower() for p in ["race complete", "finish", "end race", "done"]):
         print("[STT]  Race complete signal received.")
         race_complete = True
         return
 
-    # fast keyword match first
     command = parse_fast(text)
 
-    # fall back to GPT only if no keyword matched
     if command is None:
         print("[LLM]  No keyword match — calling GPT...")
         try:
@@ -248,6 +224,19 @@ def camera_thread_fn():
             pass
         time.sleep(0.1)
 
+# ---------------------------------------------------------------------------
+# ToF thread
+# ---------------------------------------------------------------------------
+tof_data = {"distance": 100.0}
+tof_lock  = threading.Lock()
+
+def tof_thread_fn():
+    while not race_complete:
+        dist = get_tof_distance()
+        with tof_lock:
+            tof_data["distance"] = dist
+        time.sleep(0.1)  # 10Hz — plenty for obstacle detection
+
 def stt_thread_fn():
     stt.start(on_recognized=on_speech)
     print("[STT] Speech-to-text thread started.")
@@ -270,16 +259,16 @@ def main():
         print("[INIT] Connecting to robot at {}".format(args.hostname))
 
     current_speed = "normal"
-    is_stopped    = False   # True when stopped by sensor
-    is_moving     = False   # True when last command was forward
-    is_reversing  = False   # True when last command was backward
+    is_stopped    = False
+    is_moving     = False
+    is_reversing  = False
 
-    TOF_THRESHOLD = 30.0    # cm
+    TOF_THRESHOLD = 50.0    # cm — accounts for ~10cm travel during stop latency
 
     # start background threads
     threading.Thread(target=camera_thread_fn, daemon=True).start()
+    threading.Thread(target=tof_thread_fn,    daemon=True).start()
     threading.Thread(target=stt_thread_fn,    daemon=True).start()
-    tof_thread_instance = threading.Thread(target=tof_thread, daemon=True).start()
 
     print("[INIT] Listening for commands. Say 'forward' to begin.")
     print("[INIT] Say 'race complete' to finish.")
@@ -296,18 +285,6 @@ def main():
         with camera_lock:
             cam_color  = camera_data["color"]
             yellow_pos = camera_data["position"]
-            
-        sensor_blocked = (tof_dist < TOF_THRESHOLD) or (cam_color == "red")
-
-        if sensor_blocked:
-            if not is_stopped:
-                print(f"[SENSOR] Blocked! tof={tof_dist:.1f}cm  cam={cam_color} — stopping.")
-                robot_stop()
-                is_stopped = True
-
-        with camera_lock:
-            cam_color  = camera_data["color"]
-            yellow_pos = camera_data["position"]
 
         sensor_blocked = (tof_dist < TOF_THRESHOLD) or (cam_color == "red")
 
@@ -319,7 +296,6 @@ def main():
                 is_stopped = True
 
         elif is_stopped:
-            # auto resume only if sensor caused the stop
             if is_moving or is_reversing:
                 print("[SENSOR] Path clear — auto resuming.")
                 is_stopped = False
@@ -337,7 +313,7 @@ def main():
                 robot_lane_follow(yellow_pos)
 
         # ----------------------------------------------------------------
-        # 2. VOICE COMMAND CHECK — execute once, no resend
+        # 2. VOICE COMMAND CHECK
         # ----------------------------------------------------------------
         with command_lock:
             cmd = latest_command
@@ -368,7 +344,6 @@ def main():
         elif action == "turn":
             print("[CMD]  Voice turn {}.".format(direction))
             robot_turn(direction)
-            # no auto-resume — robot stops after turn, waits for next command
 
         elif action == "move" and direction == "backward":
             print("[CMD]  Voice backward.")

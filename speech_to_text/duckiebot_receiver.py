@@ -1,10 +1,43 @@
 import argparse
 import json
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import controller
-import camera
+
+# ---------------------------------------------------------------------------
+# ToF sensor — reads from ROS topic in background thread
+# ---------------------------------------------------------------------------
+_tof_distance  = 100.0   # default: assume clear
+_tof_lock      = threading.Lock()
+
+def _start_tof_listener():
+    """Subscribe to the ToF ROS topic and cache latest reading."""
+    try:
+        import rospy
+        from sensor_msgs.msg import Range
+
+        robot_name = "duckiebot18"  # hardcoded — no dt_robot_utils needed
+
+        def _callback(msg):
+            global _tof_distance
+            dist_m = msg.range if msg.range < msg.max_range else 999.0
+            with _tof_lock:
+                _tof_distance = dist_m * 100.0  # convert to cm
+
+        # don't call init_node — controller already did it
+        rospy.Subscriber(
+            "/{}/front_center_tof_driver_node/range".format(robot_name),
+            Range,
+            _callback,
+        )
+        print("[TOF] Subscribed to ToF topic")
+    except Exception as e:
+        print("[TOF] Could not start ToF listener: {}".format(e))
+
+# start ToF listener in background
+threading.Thread(target=_start_tof_listener, daemon=True).start()
 
 
 class SimpleMotorDriver:
@@ -32,11 +65,11 @@ class SimpleMotorDriver:
 
 class ActionExecutor:
     def __init__(self, driver, forward_speed=0.35, turn_speed=0.28, turn_bias=0.55, pulse_sec=0.35):
-        self.driver        = driver
+        self.driver       = driver
         self.forward_speed = forward_speed
-        self.turn_speed    = turn_speed
-        self.turn_bias     = turn_bias
-        self.pulse_sec     = pulse_sec
+        self.turn_speed   = turn_speed
+        self.turn_bias    = turn_bias
+        self.pulse_sec    = pulse_sec
 
     def execute(self, action):
         if action in ("forward", "move"):
@@ -99,7 +132,7 @@ def build_handler(executor):
 
             action = action.strip().lower()
 
-            # map action+direction combos to simple action string
+            # map action+direction combos to simple actions
             if action == "move" and direction == "backward":
                 action = "backward"
             elif action == "turn" and direction == "right":
@@ -123,18 +156,11 @@ def build_handler(executor):
                 self._send_json(200, {"ok": True, "status": "ready"})
                 return
 
-            if self.path == "/camera-color":
-                try:
-                    frame    = camera.get_frame()
-                    color    = camera.get_camera_color(frame)
-                    position = camera.get_yellow_position(frame)
-                    self._send_json(200, {
-                        "ok":       True,
-                        "color":    color,
-                        "position": position,
-                    })
-                except Exception as exc:
-                    self._send_json(500, {"ok": False, "error": str(exc)})
+            # ToF distance endpoint — used by main.py on laptop
+            if self.path == "/tof-distance":
+                with _tof_lock:
+                    dist = _tof_distance
+                self._send_json(200, {"ok": True, "distance_cm": dist})
                 return
 
             self._send_json(404, {"ok": False, "error": "unknown endpoint"})
@@ -146,24 +172,17 @@ def build_handler(executor):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Duckiebot receiver")
+    parser = argparse.ArgumentParser(description="Tiny Duckiebot receiver for /voice-command")
     parser.add_argument("--host",          default="0.0.0.0")
     parser.add_argument("--port",          type=int,   default=8888)
     parser.add_argument("--forward-speed", type=float, default=0.35)
     parser.add_argument("--turn-speed",    type=float, default=0.28)
     parser.add_argument("--turn-bias",     type=float, default=0.55)
     parser.add_argument("--turn-pulse",    type=float, default=0.35)
+
     args = parser.parse_args()
 
-    # initialize camera first — it calls rospy.init_node
-    print("[INIT] Starting camera...")
-    camera.init_camera()
-
-    # initialize controller second — handles already-initialized node
-    print("[INIT] Starting controller...")
-    controller.init()
-
-    driver = SimpleMotorDriver(verbose=True)
+    driver   = SimpleMotorDriver(verbose=True)
     executor = ActionExecutor(
         driver=driver,
         forward_speed=args.forward_speed,
@@ -176,9 +195,9 @@ def main():
     server  = HTTPServer((args.host, args.port), handler)
 
     print("Receiver listening on http://{}:{}".format(args.host, args.port))
-    print("POST /voice-command  — move robot")
-    print("GET  /camera-color   — get camera reading")
-    print("GET  /health         — health check")
+    print("POST /voice-command")
+    print("GET  /health")
+    print("GET  /tof-distance")
 
     try:
         server.serve_forever()

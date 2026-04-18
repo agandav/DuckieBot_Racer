@@ -44,16 +44,17 @@ def _load_ros():
 ROBOT_NAME = "duckiebot18"
 
 # ---------------------------------------------------------------------------
-# Tunable constants — adjust these on the real track
+# Tunable constants — adjust on the real track
 # ---------------------------------------------------------------------------
-SPEEDS        = {"slow": 0.2, "normal": 0.35, "fast": 0.5}
-TURN_OMEGA    = 4.0   # radians/sec for turns
-TURN_DUR      = 0.5   # seconds per turn pulse
-FORWARD_DUR   = 1.0   # seconds per forward command — tune this
-BACKWARD_DUR  = 1.0   # seconds per backward command — tune this
-ADJUST_DUR    = 0.2   # seconds per lane adjust
+SPEEDS       = {"slow": 0.2, "normal": 0.35, "fast": 0.5}
+TURN_OMEGA   = 4.0   # radians/sec
+TURN_DUR     = 0.5   # seconds per turn
+FORWARD_DUR  = 1.0   # seconds per forward command
+BACKWARD_DUR = 1.0   # seconds per backward command
+ADJUST_DUR   = 0.2   # seconds per lane adjust
 
-_pub = None
+_pub            = None
+_stop_requested = False   # set True to interrupt current motion
 
 
 def init():
@@ -69,24 +70,40 @@ def init():
     print("[controller] Publishing to {}".format(topic))
 
 
-def _send(v, omega, duration):
-    """
-    Publish a wheel command, wait duration, then stop.
-    Every command stops after its duration — no continuous motion.
-    """
+def _publish(v, omega):
+    """Publish a single wheel command."""
     msg       = Twist2DStamped()
     msg.v     = v
     msg.omega = omega
     _pub.publish(msg)
-    rospy.sleep(duration)
+
+
+def _send(v, omega, duration):
+    """
+    Publish a wheel command and wait for duration.
+    Checks _stop_requested every 50ms so stop commands
+    can interrupt mid-motion instead of waiting full duration.
+    """
+    global _stop_requested
+
+    _publish(v, omega)
+
+    if duration is not None:
+        elapsed = 0.0
+        interval = 0.05  # check every 50ms
+        while elapsed < duration:
+            rospy.sleep(interval)
+            elapsed += interval
+            if _stop_requested:
+                print("[controller] Motion interrupted by stop")
+                break
+
     # always stop after every command
-    msg.v     = 0.0
-    msg.omega = 0.0
-    _pub.publish(msg)
+    _publish(0.0, 0.0)
 
 
 def execute(command):
-    global _pub
+    global _pub, _stop_requested
     if _pub is None:
         init()
 
@@ -96,10 +113,17 @@ def execute(command):
 
     print("[controller] action={} direction={} speed={}".format(action, direction, speed))
 
+    # stop — set flag to interrupt any ongoing motion, then send stop
     if action == "stop":
-        _send(0.0, 0.0, duration=0.0)
+        _stop_requested = True
+        _publish(0.0, 0.0)
+        _stop_requested = False
+        return
 
-    elif action == "move" and direction == "forward":
+    # clear stop flag before starting new motion
+    _stop_requested = False
+
+    if action == "move" and direction == "forward":
         _send(speed, 0.0, duration=FORWARD_DUR)
 
     elif action == "move" and direction == "backward":
