@@ -200,6 +200,30 @@ def on_speech(text):
         latest_command = command
 
 # ---------------------------------------------------------------------------
+# Shared state for threading
+# ---------------------------------------------------------------------------
+camera_data = {"color": "none", "position": "center"}
+camera_lock = threading.Lock()
+
+# Thread function for continuous camera reading
+def camera_thread():
+    global camera_data
+    while not race_complete:
+        try:
+            color, position = get_camera_reading()
+            with camera_lock:
+                camera_data["color"] = color
+                camera_data["position"] = position
+        except Exception as e:
+            print(f"[ERR] Camera thread error: {e}")
+        time.sleep(0.1)  # Adjust frequency as needed
+
+# Thread function for speech-to-text listener
+def stt_thread():
+    stt.start(on_recognized=on_speech)
+    print("[STT] Speech-to-text thread started.")
+
+# ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 def main():
@@ -223,17 +247,16 @@ def main():
     last_forward_time  = 0.0
     last_backward_time = 0.0
     last_camera_time   = 0.0
-    cam_color          = "none"    # cached between camera polls
-    yellow_pos         = "center"  # cached between camera polls
 
     RESEND_INTERVAL  = 0.5   # re-send forward/backward every 0.5s
     CAMERA_INTERVAL  = 0.5   # poll camera every 0.5s
     TOF_THRESHOLD    = 30.0
 
-    stt.start(on_recognized=on_speech)
-    print("[INIT] Listening for commands. Say 'forward' to begin.")
-    print("[INIT] Say 'race complete' to finish.")
-    print("=" * 50)
+    # Start threads
+    camera_thread_instance = threading.Thread(target=camera_thread, daemon=True)
+    stt_thread_instance = threading.Thread(target=stt_thread, daemon=True)
+    camera_thread_instance.start()
+    stt_thread_instance.start()
 
     while not race_complete:
         time.sleep(0.1)
@@ -241,21 +264,18 @@ def main():
 
         # ----------------------------------------------------------------
         # 1. SENSOR CHECKS
-        #    Camera polled every 0.5s — cached value used between polls
-        #    so the loop doesn't slow down waiting for HTTP every tick
+        #    Use shared camera data updated by the camera thread
         # ----------------------------------------------------------------
         tof_dist = get_tof_distance()
-
-        if now - last_camera_time >= CAMERA_INTERVAL:
-            cam_color, yellow_pos = get_camera_reading()
-            last_camera_time = now
-            print("[CAM]  color={}  yellow={}".format(cam_color, yellow_pos))
+        with camera_lock:
+            cam_color = camera_data["color"]
+            yellow_pos = camera_data["position"]
 
         sensor_blocked = (tof_dist < TOF_THRESHOLD) or (cam_color == "red")
 
         if sensor_blocked:
             if not is_stopped:
-                print("[SENSOR] Blocked! tof={:.1f}cm  cam={} — stopping.".format(tof_dist, cam_color))
+                print(f"[SENSOR] Blocked! tof={tof_dist:.1f}cm  cam={cam_color} — stopping.")
                 robot_stop()
                 is_stopped = True
 
@@ -277,7 +297,7 @@ def main():
         # ----------------------------------------------------------------
         if not sensor_blocked and not is_stopped:
             if cam_color == "yellow":
-                print("[CAM]  Yellow — lane following ({}).".format(yellow_pos))
+                print(f"[CAM]  Yellow — lane following ({yellow_pos}).")
                 robot_lane_follow(yellow_pos)
                 last_forward_time = now
 

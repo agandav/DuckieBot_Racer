@@ -10,7 +10,6 @@ import os
 
 sys.path.insert(0, os.path.dirname(__file__))
 import keys
-
 listen = True
 recognized_text = None
 stop_recognition = False
