@@ -13,7 +13,7 @@ class SimpleMotorDriver:
 
     def set_wheels(self, left, right):
         if self.verbose:
-            print(f"[MOTOR] left={left:.2f} right={right:.2f}")
+            print("[MOTOR] left={:.2f} right={:.2f}".format(left, right))
         if left > 0 and right > 0:
             controller.execute({"action": "move", "direction": "forward", "speed": "normal"})
         elif left < 0 and right < 0:
@@ -32,7 +32,7 @@ class SimpleMotorDriver:
 
 class ActionExecutor:
     def __init__(self, driver, forward_speed=0.35, turn_speed=0.28, turn_bias=0.55, pulse_sec=0.35):
-        self.driver     = driver
+        self.driver        = driver
         self.forward_speed = forward_speed
         self.turn_speed    = turn_speed
         self.turn_bias     = turn_bias
@@ -58,7 +58,7 @@ class ActionExecutor:
         if action in ("stop", "lane_follow"):
             self.driver.stop()
             return
-        raise ValueError(f"Unsupported action: {action}")
+        raise ValueError("Unsupported action: {}".format(action))
 
 
 def build_handler(executor):
@@ -99,7 +99,7 @@ def build_handler(executor):
 
             action = action.strip().lower()
 
-            # map action+direction to simple action string
+            # map action+direction combos to simple action string
             if action == "move" and direction == "backward":
                 action = "backward"
             elif action == "turn" and direction == "right":
@@ -113,21 +113,16 @@ def build_handler(executor):
                 self._send_json(400, {"ok": False, "error": str(exc)})
                 return
             except Exception as exc:
-                self._send_json(500, {"ok": False, "error": f"execution failure: {exc}"})
+                self._send_json(500, {"ok": False, "error": "execution failure: {}".format(exc)})
                 return
 
             self._send_json(200, {"ok": True, "action": action})
 
         def do_GET(self):
-            # ── /health ───────────────────────────────────────────────
             if self.path == "/health":
                 self._send_json(200, {"ok": True, "status": "ready"})
                 return
 
-            # ── /camera-color ─────────────────────────────────────────
-            # Returns what the robot camera currently sees:
-            #   color:    "red" | "yellow" | "green" | "none"
-            #   position: "left" | "right" | "center"  (yellow tape position)
             if self.path == "/camera-color":
                 try:
                     frame    = camera.get_frame()
@@ -145,7 +140,7 @@ def build_handler(executor):
             self._send_json(404, {"ok": False, "error": "unknown endpoint"})
 
         def log_message(self, format_str, *args):
-            print(f"[HTTP] {self.address_string()} - {format_str % args}")
+            print("[HTTP] {} - {}".format(self.address_string(), format_str % args))
 
     return VoiceCommandHandler
 
@@ -160,9 +155,13 @@ def main():
     parser.add_argument("--turn-pulse",    type=float, default=0.35)
     args = parser.parse_args()
 
-    # initialize camera on startup
+    # initialize camera first — it calls rospy.init_node
     print("[INIT] Starting camera...")
     camera.init_camera()
+
+    # initialize controller second — handles already-initialized node
+    print("[INIT] Starting controller...")
+    controller.init()
 
     driver = SimpleMotorDriver(verbose=True)
     executor = ActionExecutor(
@@ -176,7 +175,7 @@ def main():
     handler = build_handler(executor)
     server  = HTTPServer((args.host, args.port), handler)
 
-    print(f"Receiver listening on http://{args.host}:{args.port}")
+    print("Receiver listening on http://{}:{}".format(args.host, args.port))
     print("POST /voice-command  — move robot")
     print("GET  /camera-color   — get camera reading")
     print("GET  /health         — health check")

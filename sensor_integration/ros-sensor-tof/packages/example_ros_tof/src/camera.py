@@ -5,13 +5,13 @@ Runs on the robot inside Docker container, reads from ROS camera topic.
 
 get_camera_color()    → "red" | "yellow" | "green" | "none"
 get_yellow_position() → "left" | "right" | "center"
+get_frame()           → raw BGR frame from camera
 """
 
 import cv2
 import numpy as np
 import threading
 
-# ROS imports — available inside Docker container
 import rospy
 from sensor_msgs.msg import CompressedImage
 from turbojpeg import TurboJPEG
@@ -44,35 +44,33 @@ GREEN_THRESHOLD      = 300
 YELLOW_ZONE_MIN      = 300
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ROS camera subscriber — runs in background thread
+# ROS camera subscriber
 # ─────────────────────────────────────────────────────────────────────────────
-jpeg         = TurboJPEG()
+jpeg          = TurboJPEG()
 _latest_frame = None
 _frame_lock   = threading.Lock()
 _initialized  = False
 
-def _camera_callback(msg: CompressedImage):
+
+def _camera_callback(msg):
     global _latest_frame
     try:
         frame = jpeg.decode(msg.data)
         with _frame_lock:
             _latest_frame = frame
     except Exception as e:
-        print(f"[CAM] Decode error: {e}")
+        print("[CAM] Decode error: {}".format(e))
+
 
 def init_camera():
-    """
-    Subscribe to robot camera topic.
-    Call once at startup before using get_frame().
-    Safe to call multiple times — only initializes once.
-    """
+    """Subscribe to robot camera topic. Call once at startup."""
     global _initialized
     if _initialized:
         return
     try:
         rospy.init_node('camera_detector', anonymous=True, disable_signals=True)
     except rospy.exceptions.ROSException:
-        pass  # node already initialized
+        pass
     rospy.Subscriber(
         "/duckiebot18/camera_node/image/compressed",
         CompressedImage,
@@ -83,8 +81,9 @@ def init_camera():
     _initialized = True
     print("[CAM] Subscribed to robot camera topic")
 
-def get_frame() -> np.ndarray | None:
-    """Returns latest frame from robot camera."""
+
+def get_frame():
+    """Returns latest frame from robot camera as BGR numpy array."""
     init_camera()
     with _frame_lock:
         if _latest_frame is None:
@@ -92,10 +91,11 @@ def get_frame() -> np.ndarray | None:
             return None
         return _latest_frame.copy()
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Color detection
 # ─────────────────────────────────────────────────────────────────────────────
-def detect_color_in_region(region: np.ndarray) -> dict:
+def detect_color_in_region(region):
     hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
     red_mask = (
         cv2.inRange(hsv, RED_LOWER_1, RED_UPPER_1) |
@@ -111,7 +111,8 @@ def detect_color_in_region(region: np.ndarray) -> dict:
         "green":  cv2.countNonZero(green_mask),
     }
 
-def analyze_frame(frame: np.ndarray) -> dict:
+
+def analyze_frame(frame):
     h, w = frame.shape[:2]
     mid  = h // 2
 
@@ -146,12 +147,22 @@ def analyze_frame(frame: np.ndarray) -> dict:
         }
     }
 
-def get_camera_color(frame: np.ndarray = None) -> str:
+
+def get_camera_color(frame=None):
+    """
+    Returns what the camera sees:
+        "red"    → stop
+        "yellow" → lane follow
+        "green"  → go
+        "none"   → nothing detected
+    """
     if frame is None:
         frame = get_frame()
     if frame is None:
         return "none"
+
     result = analyze_frame(frame)
+
     if result["top"] == "red" or result["bottom"] == "red":
         return "red"
     if result["bottom"] == "yellow":
@@ -160,7 +171,12 @@ def get_camera_color(frame: np.ndarray = None) -> str:
         return "green"
     return "none"
 
-def get_yellow_position(frame: np.ndarray = None) -> str:
+
+def get_yellow_position(frame=None):
+    """
+    Finds where yellow tape is in bottom half of frame.
+    Returns: "left" | "right" | "center"
+    """
     if frame is None:
         frame = get_frame()
     if frame is None:

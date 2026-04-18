@@ -2,7 +2,7 @@
 main.py — DuckieBot Racer
 
 Loop logic (every iteration):
-    1. GET /camera-color from robot — gets color + yellow position in one call
+    1. GET /camera-color from robot every 0.5s (cached between polls)
     2. Sensor check (ToF + camera) — highest priority
        - ToF < threshold OR cam = red  → stop
        - cam = yellow → lane follow using yellow position
@@ -66,26 +66,25 @@ QUICK_COMMANDS = [
 
 COMMAND_WORDS = [w for w, _ in QUICK_COMMANDS] + ["race complete", "finish", "end race", "done"]
 
-def contains_command(text: str) -> bool:
+def contains_command(text):
     text_lower = text.lower()
     return any(w in text_lower for w in COMMAND_WORDS)
 
-def parse_fast(text: str) -> dict | None:
+def parse_fast(text):
     text_lower = text.lower().strip().rstrip(".")
     for keyword, command in QUICK_COMMANDS:
         if keyword in text_lower:
-            print(f"[FAST] Matched '{keyword}' — skipping GPT")
+            print("[FAST] Matched '{}' — skipping GPT".format(keyword))
             return command
     return None
 
 # ---------------------------------------------------------------------------
 # HTTP helpers
 # ---------------------------------------------------------------------------
-def _http_post(path: str, payload: dict):
-    """POST JSON to robot."""
+def _http_post(path, payload):
     data = json.dumps(payload).encode("utf-8")
     req  = urllib.request.Request(
-        url=f"http://{args.hostname}:8888{path}",
+        url="http://{}:8888{}".format(args.hostname, path),
         data=data,
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -93,18 +92,17 @@ def _http_post(path: str, payload: dict):
     with urllib.request.urlopen(req, timeout=2.0) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
-def _http_get(path: str) -> dict:
-    """GET from robot, returns parsed JSON."""
+def _http_get(path):
     req = urllib.request.Request(
-        url=f"http://{args.hostname}:8888{path}",
+        url="http://{}:8888{}".format(args.hostname, path),
         method="GET",
     )
     with urllib.request.urlopen(req, timeout=2.0) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
-def send_command(action: str, direction: str = None, speed: str = "normal"):
+def send_command(action, direction=None, speed="normal"):
     if args.dry_run or not args.hostname:
-        print(f"[ROBOT] action={action}  direction={direction}  speed={speed}")
+        print("[ROBOT] action={}  direction={}  speed={}".format(action, direction, speed))
         return
     try:
         result = _http_post("/voice-command", {
@@ -112,18 +110,17 @@ def send_command(action: str, direction: str = None, speed: str = "normal"):
             "direction": direction,
             "speed":     speed,
         })
-        print(f"[HTTP] action={action} ok={result.get('ok')}")
+        print("[HTTP] action={} ok={}".format(action, result.get("ok")))
     except urllib.error.URLError as e:
-        print(f"[ERR]  Could not reach robot: {e}")
+        print("[ERR]  Could not reach robot: {}".format(e))
     except Exception as e:
-        print(f"[ERR]  send_command failed: {e}")
+        print("[ERR]  send_command failed: {}".format(e))
 
-def get_camera_reading() -> tuple[str, str]:
+def get_camera_reading():
     """
     GET /camera-color from robot.
     Returns (color, yellow_position).
-    color:    "red" | "yellow" | "green" | "none"
-    position: "left" | "right" | "center"
+    Only called every CAMERA_INTERVAL seconds.
     """
     if args.dry_run or not args.hostname:
         return "none", "center"
@@ -131,7 +128,7 @@ def get_camera_reading() -> tuple[str, str]:
         result = _http_get("/camera-color")
         return result.get("color", "none"), result.get("position", "center")
     except Exception as e:
-        print(f"[ERR]  Camera read failed: {e}")
+        print("[ERR]  Camera read failed: {}".format(e))
         return "none", "center"
 
 # ---------------------------------------------------------------------------
@@ -142,20 +139,20 @@ def robot_stop():
     send_command("stop")
 
 def robot_forward(speed="normal"):
-    print(f"[ROBOT] FORWARD  speed={speed}")
+    print("[ROBOT] FORWARD  speed={}".format(speed))
     send_command("move", "forward", speed)
 
-def robot_turn(direction: str):
-    print(f"[ROBOT] TURN {direction.upper()}")
+def robot_turn(direction):
+    print("[ROBOT] TURN {}".format(direction.upper()))
     send_command("turn", direction)
     time.sleep(1.0)
 
 def robot_backward(speed="normal"):
-    print(f"[ROBOT] BACKWARD  speed={speed}")
+    print("[ROBOT] BACKWARD  speed={}".format(speed))
     send_command("move", "backward", speed)
 
-def robot_lane_follow(yellow_pos: str):
-    print(f"[ROBOT] LANE FOLLOW  yellow={yellow_pos}")
+def robot_lane_follow(yellow_pos):
+    print("[ROBOT] LANE FOLLOW  yellow={}".format(yellow_pos))
     if yellow_pos == "left":
         send_command("adjust", "left")
     elif yellow_pos == "right":
@@ -166,22 +163,22 @@ def robot_lane_follow(yellow_pos: str):
 # ---------------------------------------------------------------------------
 # ToF stub — replace with real sensor
 # ---------------------------------------------------------------------------
-def get_tof_distance() -> float:
+def get_tof_distance():
     return 100.0
 
 # ---------------------------------------------------------------------------
 # STT callback
 # ---------------------------------------------------------------------------
-def on_speech(text: str):
+def on_speech(text):
     global latest_command, race_complete
 
     if not text or not text.strip():
         return
 
-    print(f"[STT]  '{text}'")
+    print("[STT]  '{}'".format(text))
 
     if not contains_command(text):
-        print(f"[STT]  Ignored (no command word found)")
+        print("[STT]  Ignored (no command word found)")
         return
 
     if any(p in text.lower() for p in ["race complete", "finish", "end race", "done"]):
@@ -194,9 +191,9 @@ def on_speech(text: str):
         print("[LLM]  No keyword match — calling GPT...")
         try:
             command = parse(text)
-            print(f"[LLM]  {command}")
+            print("[LLM]  {}".format(command))
         except Exception as e:
-            print(f"[LLM]  Parse error: {e}")
+            print("[LLM]  Parse error: {}".format(e))
             return
 
     with command_lock:
@@ -217,7 +214,7 @@ def main():
     if args.dry_run:
         print("[INIT] DRY RUN mode")
     else:
-        print(f"[INIT] Connecting to robot at {args.hostname}")
+        print("[INIT] Connecting to robot at {}".format(args.hostname))
 
     current_speed      = "normal"
     is_stopped         = False
@@ -225,8 +222,13 @@ def main():
     is_reversing       = False
     last_forward_time  = 0.0
     last_backward_time = 0.0
-    RESEND_INTERVAL    = 0.5
-    TOF_THRESHOLD      = 30.0
+    last_camera_time   = 0.0
+    cam_color          = "none"    # cached between camera polls
+    yellow_pos         = "center"  # cached between camera polls
+
+    RESEND_INTERVAL  = 0.5   # re-send forward/backward every 0.5s
+    CAMERA_INTERVAL  = 0.5   # poll camera every 0.5s
+    TOF_THRESHOLD    = 30.0
 
     stt.start(on_recognized=on_speech)
     print("[INIT] Listening for commands. Say 'forward' to begin.")
@@ -239,16 +241,21 @@ def main():
 
         # ----------------------------------------------------------------
         # 1. SENSOR CHECKS
-        #    One HTTP call gets both color AND yellow position from robot
+        #    Camera polled every 0.5s — cached value used between polls
+        #    so the loop doesn't slow down waiting for HTTP every tick
         # ----------------------------------------------------------------
-        tof_dist             = get_tof_distance()
-        cam_color, yellow_pos = get_camera_reading()
+        tof_dist = get_tof_distance()
+
+        if now - last_camera_time >= CAMERA_INTERVAL:
+            cam_color, yellow_pos = get_camera_reading()
+            last_camera_time = now
+            print("[CAM]  color={}  yellow={}".format(cam_color, yellow_pos))
 
         sensor_blocked = (tof_dist < TOF_THRESHOLD) or (cam_color == "red")
 
         if sensor_blocked:
             if not is_stopped:
-                print(f"[SENSOR] Blocked! tof={tof_dist:.1f}cm  cam={cam_color} — stopping.")
+                print("[SENSOR] Blocked! tof={:.1f}cm  cam={} — stopping.".format(tof_dist, cam_color))
                 robot_stop()
                 is_stopped = True
 
@@ -270,7 +277,7 @@ def main():
         # ----------------------------------------------------------------
         if not sensor_blocked and not is_stopped:
             if cam_color == "yellow":
-                print(f"[CAM]  Yellow — lane following ({yellow_pos}).")
+                print("[CAM]  Yellow — lane following ({}).".format(yellow_pos))
                 robot_lane_follow(yellow_pos)
                 last_forward_time = now
 
@@ -315,7 +322,7 @@ def main():
             last_forward_time = now
 
         elif action == "turn":
-            print(f"[CMD]  Voice turn {direction}.")
+            print("[CMD]  Voice turn {}.".format(direction))
             robot_turn(direction)
             if is_moving:
                 is_stopped = False
@@ -333,7 +340,7 @@ def main():
 
         elif action == "adjust" or speed != current_speed:
             current_speed = speed
-            print(f"[CMD]  Speed adjusted to {current_speed}.")
+            print("[CMD]  Speed adjusted to {}.".format(current_speed))
             if is_moving and not is_stopped:
                 robot_forward(current_speed)
                 last_forward_time = now
@@ -342,7 +349,7 @@ def main():
                 last_backward_time = now
 
         else:
-            print(f"[CMD]  Unhandled command: {cmd}")
+            print("[CMD]  Unhandled command: {}".format(cmd))
 
     print("=" * 50)
     print("[DONE] Race complete. Stopping robot.")
