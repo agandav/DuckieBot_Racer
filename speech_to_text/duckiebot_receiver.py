@@ -2,57 +2,61 @@ import argparse
 import json
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
-import subprocess
+
+import controller
+import camera
 
 
 class SimpleMotorDriver:
-    def __init__(self, robot_name="duckiebot18", verbose=True):
-        self.robot_name = robot_name
+    def __init__(self, verbose=True):
         self.verbose = verbose
 
     def set_wheels(self, left: float, right: float):
         if self.verbose:
             print(f"[MOTOR] left={left:.2f} right={right:.2f}")
-        import subprocess
-        subprocess.Popen([
-            "rostopic", "pub", "-1",
-            f"/{self.robot_name}/wheels_driver_node/wheels_cmd",
-            "duckietown_msgs/WheelsCmdStamped",
-            f"{{vel_left: {left}, vel_right: {right}}}"
-        ])
+        if left > 0 and right > 0:
+            controller.execute({"action": "move", "direction": "forward", "speed": "normal"})
+        elif left < 0 and right < 0:
+            controller.execute({"action": "move", "direction": "backward", "speed": "normal"})
+        elif left <= 0 and right > 0:
+            controller.execute({"action": "turn", "direction": "left", "speed": None})
+        elif left > 0 and right <= 0:
+            controller.execute({"action": "turn", "direction": "right", "speed": None})
+        else:
+            controller.execute({"action": "stop", "direction": None, "speed": None})
 
     def stop(self):
-        self.set_wheels(0.0, 0.0)
+        print("[MOTOR] STOP")
+        controller.execute({"action": "stop", "direction": None, "speed": None})
 
 class ActionExecutor:
     def __init__(self, driver, forward_speed=0.35, turn_speed=0.28, turn_bias=0.55, pulse_sec=0.35):
-        self.driver = driver
+        self.driver     = driver
         self.forward_speed = forward_speed
-        self.turn_speed = turn_speed
-        self.turn_bias = turn_bias
-        self.pulse_sec = pulse_sec
+        self.turn_speed    = turn_speed
+        self.turn_bias     = turn_bias
+        self.pulse_sec     = pulse_sec
 
     def execute(self, action):
-        if action == "forward":
+        if action in ("forward", "move"):
             self.driver.set_wheels(self.forward_speed, self.forward_speed)
             return
-
         if action == "left":
             self.driver.set_wheels(-self.turn_speed * self.turn_bias, self.turn_speed)
             time.sleep(self.pulse_sec)
             self.driver.stop()
             return
-
         if action == "right":
             self.driver.set_wheels(self.turn_speed, -self.turn_speed * self.turn_bias)
             time.sleep(self.pulse_sec)
             self.driver.stop()
             return
-
-        if action == "stop":
+        if action == "backward":
+            self.driver.set_wheels(-self.forward_speed, -self.forward_speed)
+            return
+        if action in ("stop", "lane_follow"):
             self.driver.stop()
             return
-
         raise ValueError(f"Unsupported action: {action}")
 
 
@@ -85,27 +89,58 @@ def build_handler(executor):
                 self._send_json(400, {"ok": False, "error": "invalid json"})
                 return
 
-            action = data.get("action")
+            action    = data.get("action")
+            direction = data.get("direction")
+
             if not isinstance(action, str):
                 self._send_json(400, {"ok": False, "error": "missing action"})
                 return
 
             action = action.strip().lower()
+
+            # map action+direction to simple action string
+            if action == "move" and direction == "backward":
+                action = "backward"
+            elif action == "turn" and direction == "right":
+                action = "right"
+            elif action == "turn" and direction == "left":
+                action = "left"
+
             try:
                 executor.execute(action)
             except ValueError as exc:
                 self._send_json(400, {"ok": False, "error": str(exc)})
                 return
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 self._send_json(500, {"ok": False, "error": f"execution failure: {exc}"})
                 return
 
             self._send_json(200, {"ok": True, "action": action})
 
         def do_GET(self):
+            # ── /health ───────────────────────────────────────────────
             if self.path == "/health":
                 self._send_json(200, {"ok": True, "status": "ready"})
                 return
+
+            # ── /camera-color ─────────────────────────────────────────
+            # Returns what the robot camera currently sees:
+            #   color:    "red" | "yellow" | "green" | "none"
+            #   position: "left" | "right" | "center"  (yellow tape position)
+            if self.path == "/camera-color":
+                try:
+                    frame    = camera.get_frame()
+                    color    = camera.get_camera_color(frame)
+                    position = camera.get_yellow_position(frame)
+                    self._send_json(200, {
+                        "ok":       True,
+                        "color":    color,
+                        "position": position,
+                    })
+                except Exception as exc:
+                    self._send_json(500, {"ok": False, "error": str(exc)})
+                return
+
             self._send_json(404, {"ok": False, "error": "unknown endpoint"})
 
         def log_message(self, format_str, *args):
@@ -115,15 +150,18 @@ def build_handler(executor):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Tiny Duckiebot receiver for /voice-command")
-    parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=8080, help="Bind port (default: 8080)")
-    parser.add_argument("--forward-speed", type=float, default=0.35, help="Forward wheel speed")
-    parser.add_argument("--turn-speed", type=float, default=0.28, help="Turn wheel speed")
-    parser.add_argument("--turn-bias", type=float, default=0.55, help="Inner wheel bias while turning")
-    parser.add_argument("--turn-pulse", type=float, default=0.35, help="Seconds for each turn pulse")
-
+    parser = argparse.ArgumentParser(description="Duckiebot receiver")
+    parser.add_argument("--host",          default="0.0.0.0")
+    parser.add_argument("--port",          type=int,   default=8888)
+    parser.add_argument("--forward-speed", type=float, default=0.35)
+    parser.add_argument("--turn-speed",    type=float, default=0.28)
+    parser.add_argument("--turn-bias",     type=float, default=0.55)
+    parser.add_argument("--turn-pulse",    type=float, default=0.35)
     args = parser.parse_args()
+
+    # initialize camera on startup
+    print("[INIT] Starting camera...")
+    camera.init_camera()
 
     driver = SimpleMotorDriver(verbose=True)
     executor = ActionExecutor(
@@ -135,11 +173,12 @@ def main():
     )
 
     handler = build_handler(executor)
-    server = HTTPServer((args.host, args.port), handler)
+    server  = HTTPServer((args.host, args.port), handler)
 
     print(f"Receiver listening on http://{args.host}:{args.port}")
-    print("POST /voice-command with JSON: {\"action\": \"forward|left|right|stop\"}")
-    print("GET  /health")
+    print("POST /voice-command  — move robot")
+    print("GET  /camera-color   — get camera reading")
+    print("GET  /health         — health check")
 
     try:
         server.serve_forever()

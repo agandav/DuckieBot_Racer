@@ -5,14 +5,17 @@
 # venv/bin/pip install azure-cognitiveservices-speech
 import azure.cognitiveservices.speech as speechsdk
 import time
-import keys 
+import sys
+import os
+
+sys.path.insert(0, os.path.dirname(__file__))
+import keys
 
 listen = True
 recognized_text = None
 stop_recognition = False
 speech_recognizer = None
 _on_recognized_callback = None
-
 
 
 def set_up(on_recognized=None):
@@ -23,6 +26,22 @@ def set_up(on_recognized=None):
         subscription=keys.azure_key,
         region=keys.azure_region)
     speech_config.speech_recognition_language = "en-US"
+
+    # ---------------------------------------------------------------------------
+    # Latency optimizations
+    # ---------------------------------------------------------------------------
+    # How long to wait after speech stops before firing recognized event
+    # Default is 1500ms — reduced to 500ms for faster response
+    speech_config.set_property(
+        speechsdk.PropertyId.SpeechServiceConnection_EndSilenceTimeoutMs,
+        "500"
+    )
+    # How long to wait for speech to start before giving up
+    speech_config.set_property(
+        speechsdk.PropertyId.SpeechServiceConnection_InitialSilenceTimeoutMs,
+        "5000"
+    )
+
     speech_recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config)
 
     # Continuous recognition — fires on every recognized chunk, no restart gap
