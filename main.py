@@ -170,10 +170,17 @@ def robot_lane_follow(yellow_pos):
         send_command("move", "forward")
 
 # ---------------------------------------------------------------------------
-# ToF stub — replace with real sensor read
+# ToF thread
 # ---------------------------------------------------------------------------
-def get_tof_distance():
-    return 100.0    # stub: always clear
+tof_data = {"distance": 100.0}
+tof_lock  = threading.Lock()
+
+def tof_thread():
+    while not race_complete:
+        dist = get_tof_distance()
+        with tof_lock:
+            tof_data["distance"] = dist
+        time.sleep(0.05)  # 20 Hz is plenty for a slow bot
 
 # ---------------------------------------------------------------------------
 # STT callback — runs in STT thread
@@ -272,6 +279,7 @@ def main():
     # start background threads
     threading.Thread(target=camera_thread_fn, daemon=True).start()
     threading.Thread(target=stt_thread_fn,    daemon=True).start()
+    tof_thread_instance = threading.Thread(target=tof_thread, daemon=True).start()
 
     print("[INIT] Listening for commands. Say 'forward' to begin.")
     print("[INIT] Say 'race complete' to finish.")
@@ -283,7 +291,8 @@ def main():
         # ----------------------------------------------------------------
         # 1. SENSOR CHECKS
         # ----------------------------------------------------------------
-        tof_dist = get_tof_distance()
+        with tof_lock:
+            tof_dist = tof_data["distance"]
         with camera_lock:
             cam_color  = camera_data["color"]
             yellow_pos = camera_data["position"]
