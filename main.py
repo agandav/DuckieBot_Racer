@@ -125,6 +125,16 @@ def get_camera_reading():
     except Exception:
         return "none", "center"  # fail silently
 
+def get_tof_distance():
+    if args.dry_run or not args.hostname:
+        return 100.0
+    try:
+        result = _http_get("/sensor/tof-distance")  # Updated path to match robot's API
+        return float(result.get("distance_cm", 100.0))
+    except Exception as e:
+        print("[ERR]  ToF read failed: {}".format(e))
+        return 100.0  # fail-safe: assume clear
+
 # ---------------------------------------------------------------------------
 # Robot actions — each executes once then stops (duration handled by controller)
 # ---------------------------------------------------------------------------
@@ -274,6 +284,14 @@ def main():
         # 1. SENSOR CHECKS
         # ----------------------------------------------------------------
         tof_dist = get_tof_distance()
+        sensor_blocked = (tof_dist < TOF_THRESHOLD) or (cam_color == "red")
+
+        if sensor_blocked:
+            if not is_stopped:
+                print(f"[SENSOR] Blocked! tof={tof_dist:.1f}cm  cam={cam_color} — stopping.")
+                robot_stop()
+                is_stopped = True
+
         with camera_lock:
             cam_color  = camera_data["color"]
             yellow_pos = camera_data["position"]
