@@ -284,6 +284,10 @@ def main():
         # 1. SENSOR CHECKS
         # ----------------------------------------------------------------
         tof_dist = get_tof_distance()
+        with camera_lock:
+            cam_color  = camera_data["color"]
+            yellow_pos = camera_data["position"]
+            
         sensor_blocked = (tof_dist < TOF_THRESHOLD) or (cam_color == "red")
 
         if sensor_blocked:
