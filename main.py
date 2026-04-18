@@ -129,7 +129,7 @@ def get_tof_distance():
     if args.dry_run or not args.hostname:
         return 100.0
     try:
-        result = _http_get("/sensor/tof-distance")  # Updated path to match robot's API
+        result = _http_get("/tof-distance")  # Updated path to match robot's API
         return float(result.get("distance_cm", 100.0))
     except Exception as e:
         print("[ERR]  ToF read failed: {}".format(e))
